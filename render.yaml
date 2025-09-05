@@ -3,6 +3,7 @@ services:
   - type: web
     name: acencia-backend
     env: python
+    pythonVersion: "3.11.9"
     buildCommand: "cd backend && pip install -r requirements.txt"
     startCommand: "cd backend && uvicorn server:app --host 0.0.0.0 --port $PORT"
     envVars:
@@ -11,7 +12,7 @@ services:
       - key: DB_NAME
         value: acencia_production
       - key: CORS_ORIGINS
-        value: https://your-frontend-url.onrender.com,http://localhost:3000
+        value: https://acencia-frontend.onrender.com,http://localhost:3000
       - key: ENVIRONMENT
         value: production
 
@@ -19,8 +20,9 @@ services:
   - type: web
     name: acencia-frontend
     env: node
+    nodeVersion: "18.17.0"
     buildCommand: "cd frontend && yarn install && yarn build"
-    startCommand: "cd frontend && yarn start"
+    startCommand: "cd frontend && serve -s build"
     envVars:
       - key: REACT_APP_BACKEND_URL
         value: https://acencia-backend.onrender.com/api
