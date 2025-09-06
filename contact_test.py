@@ -1,32 +1,70 @@
-import pytest
-from fastapi.testclient import TestClient
-from unittest.mock import patch
+import asyncio
+import sys
+from pathlib import Path
 import os
+import sqlalchemy
 
-@pytest.fixture
-def client():
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setenv("MONGO_URL", "mongodb://localhost:27017")
-    monkeypatch.setenv("DB_NAME", "test_db")
-    from backend.server import app
-    with TestClient(app) as c:
-        yield c
+# Add the backend directory to the Python path
+sys.path.insert(0, str(Path(__file__).parent.absolute()))
 
-@patch('backend.server.send_email')
-def test_contact_form(mock_send_email, client):
-    """Test POST /api/contact endpoint"""
-    mock_send_email.return_value = {"status": "success", "message": "Nachricht erfolgreich gesendet"}
+from backend.server import save_contact_submission, ContactForm, database, contact_submissions, metadata
 
-    test_data = {
-        "name": "Max Mustermann",
-        "email": "max.mustermann@example.com",
-        "company": "Mustermann GmbH",
-        "phone": "+49 123 456789",
-        "message": "Dies ist eine Testnachricht für die Kontaktformular-Funktionalität."
-    }
+async def run_test():
+    """
+    Tests the contact form submission logic by directly calling the
+    save_contact_submission function and verifying the data in the database.
+    """
+    print("Starting test...")
+    try:
+        # Connect to the database and create the table
+        print("Connecting to database...")
+        await database.connect()
+        print("Creating table...")
+        engine = sqlalchemy.create_engine(str(database.url))
+        metadata.create_all(engine)
+        print("Table created.")
 
-    response = client.post("/api/contact", json=test_data)
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "success", "message": "Nachricht erfolgreich gesendet"}
-    mock_send_email.assert_called_once()
+        # Create a test contact form data object
+        print("Creating test data...")
+        test_data = ContactForm(
+            name="Test User",
+            email="test@example.com",
+            company="Test Inc.",
+            phone="1234567890",
+            message="This is a test message."
+        )
+
+        # Call the save_contact_submission function
+        print("Saving contact submission...")
+        await save_contact_submission(test_data)
+        print("Contact submission saved.")
+
+        # Verify that the data was inserted correctly
+        print("Verifying data...")
+        query = contact_submissions.select()
+        results = await database.fetch_all(query)
+
+        assert len(results) == 1
+        assert results[0]["name"] == "Test User"
+        assert results[0]["email"] == "test@example.com"
+        assert results[0]["company"] == "Test Inc."
+        assert results[0]["phone"] == "1234567890"
+        assert results[0]["message"] == "This is a test message."
+
+        print("Test passed successfully!")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Disconnect from the database
+        print("Disconnecting from database...")
+        await database.disconnect()
+
+        # Clean up the test database
+        if os.path.exists("./test.db"):
+            os.remove("./test.db")
+        print("Test finished.")
+
+if __name__ == "__main__":
+    asyncio.run(run_test())

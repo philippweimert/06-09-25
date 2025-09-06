@@ -1,43 +1,49 @@
 from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional
+from typing import Optional
 import uuid
 from datetime import datetime
 import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import databases
+import sqlalchemy
+from sqlalchemy.ext.asyncio import create_async_engine
 
-
+# --- Basic Setup ---
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# --- Database Setup ---
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+database = databases.Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
 
-# Create the main app without a prefix
+# Define the table for contact submissions
+contact_submissions = sqlalchemy.Table(
+    "contact_submissions",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.String, primary_key=True),
+    sqlalchemy.Column("name", sqlalchemy.String),
+    sqlalchemy.Column("email", sqlalchemy.String),
+    sqlalchemy.Column("company", sqlalchemy.String, nullable=True),
+    sqlalchemy.Column("phone", sqlalchemy.String, nullable=True),
+    sqlalchemy.Column("message", sqlalchemy.String),
+    sqlalchemy.Column("timestamp", sqlalchemy.DateTime),
+)
+
+
+# --- FastAPI App Initialization ---
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
 
-# Define Models
-class StatusCheck(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
+# --- Pydantic Models ---
 class ContactForm(BaseModel):
     name: str
     email: EmailStr
@@ -45,89 +51,70 @@ class ContactForm(BaseModel):
     phone: Optional[str] = None
     message: str
 
-# Email configuration
-async def send_email(contact_data: ContactForm):
-    """Send contact form data via email"""
+
+# --- Core Logic ---
+async def save_contact_submission(contact_data: ContactForm):
+    """Saves contact form data to the database and logs an email-like message."""
     try:
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = "noreply@acencia.de"
-        msg['To'] = "philipp.weimert@acencia.de"
-        msg['Subject'] = f"Neue Kontaktanfrage von {contact_data.name}"
+        # Prepare data for insertion
+        query = contact_submissions.insert().values(
+            id=str(uuid.uuid4()),
+            name=contact_data.name,
+            email=contact_data.email,
+            company=contact_data.company,
+            phone=contact_data.phone,
+            message=contact_data.message,
+            timestamp=datetime.utcnow()
+        )
+        await database.execute(query)
 
-        # Email body
+        # The email sending logic is kept as a logging mechanism as in the original code
         body = f"""
-Neue Kontaktanfrage über die Website:
+        New contact request via website:
 
-Name: {contact_data.name}
-E-Mail: {contact_data.email}
-Unternehmen: {contact_data.company or 'Nicht angegeben'}
-Telefon: {contact_data.phone or 'Nicht angegeben'}
+        Name: {contact_data.name}
+        E-Mail: {contact_data.email}
+        Company: {contact_data.company or 'Not specified'}
+        Phone: {contact_data.phone or 'Not specified'}
 
-Nachricht:
-{contact_data.message}
+        Message:
+        {contact_data.message}
 
----
-Gesendet am: {datetime.now().strftime('%d.%m.%Y um %H:%M:%S')}
-"""
+        ---
+        Sent on: {datetime.now().strftime('%d.%m.%Y at %H:%M:%S')}
+        """
+        logger.info(f"Contact form submission logged: {body}")
 
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        return {"status": "success", "message": "Message sent successfully"}
 
-        # For now, we'll use a simple SMTP setup that would work with most providers
-        # In production, you would configure this with your actual SMTP settings
-        
-        # Since we don't have SMTP credentials configured, we'll save to database instead
-        # and log the email content
-        
-        # Save contact form submission to database
-        contact_dict = contact_data.dict()
-        contact_dict['id'] = str(uuid.uuid4())
-        contact_dict['timestamp'] = datetime.utcnow()
-        contact_dict['status'] = 'sent'
-        
-        await db.contact_submissions.insert_one(contact_dict)
-        
-        # Log the email content for now (in production, this would actually send)
-        logger.info(f"Contact form submission: {body}")
-        
-        return {"status": "success", "message": "Nachricht erfolgreich gesendet"}
-        
     except Exception as e:
-        logger.error(f"Failed to send email: {str(e)}")
-        raise HTTPException(status_code=500, detail="Fehler beim Senden der Nachricht")
+        logger.error(f"Failed to save contact submission: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error sending message")
 
-# Add your routes to the router instead of directly to app
+
+# --- API Routes ---
 @api_router.get("/")
 async def root():
     return {"message": "Hello World"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
-
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
 
 @api_router.post("/contact")
 async def submit_contact_form(contact_data: ContactForm):
     """Handle contact form submission"""
     try:
-        result = await send_email(contact_data)
+        result = await save_contact_submission(contact_data)
         return result
     except HTTPException as e:
+        # Re-raise HTTPException to let FastAPI handle it
         raise e
     except Exception as e:
         logger.error(f"Unexpected error in contact form: {str(e)}")
-        raise HTTPException(status_code=500, detail="Ein unerwarteter Fehler ist aufgetreten")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 # Include the router in the main app
 app.include_router(api_router)
 
+# --- Middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -136,13 +123,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
+# --- Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# --- Startup and Shutdown Events ---
+@app.on_event("startup")
+async def startup():
+    # Create tables if they don't exist
+    engine = create_async_engine(DATABASE_URL)
+    async with engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+    await database.connect()
+
+
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+async def shutdown():
+    await database.disconnect()
