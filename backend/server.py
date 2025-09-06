@@ -21,6 +21,8 @@ load_dotenv(ROOT_DIR / '.env')
 
 # --- Database Setup ---
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 database = databases.Database(DATABASE_URL)
 metadata = sqlalchemy.MetaData()
 
